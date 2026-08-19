@@ -1,3 +1,4 @@
+![CI](https://github.com/realMNohgee/RepForge/actions/workflows/ci.yml/badge.svg) ![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg) ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 <p align="center">
   <img src="https://img.shields.io/badge/version-1.0.0-gold?style=for-the-badge" alt="version">
   <img src="https://img.shields.io/badge/python-3.10+-blue?style=for-the-badge" alt="python">
