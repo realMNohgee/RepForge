@@ -1,23 +1,33 @@
 #!/usr/bin/env python3
 """
 ┌─────────────────────────────────────────────────┐
-│  ⚖  REPFORGE  v1.0                              │
+│  ⚖  REPFORGE  v2.0                              │
 │  Agent Reputation Ledger & Trust Registry       │
 └─────────────────────────────────────────────────┘
 
 Register agents. Log outcomes. Compute Bayesian trust scores.
 Build verifiable reputation graphs. Audit trails included.
-Zero dependencies. Pure Python stdlib.
+
+Signed, hash-chained, tamper-evident. One dependency: PyNaCl (Ed25519).
 """
 
 import sys
 import os
 import json
 import hashlib
-import time
+import base64
 from pathlib import Path
 from datetime import datetime, timezone
 from collections import defaultdict
+
+# Ed25519 signing (the one dependency). Read-only commands still work
+# without it; anything that writes or verifies requires PyNaCl.
+try:
+    from nacl.signing import SigningKey, VerifyKey
+    from nacl.encoding import HexEncoder
+    NACL_AVAILABLE = True
+except ImportError:
+    NACL_AVAILABLE = False
 
 # ── Styling (registry / dark authoritative) ───────────────────
 RST   = "\033[0m"
@@ -31,10 +41,12 @@ WHT   = "\033[97m"
 GRAY  = "\033[90m"
 AMBER = "\033[38;5;214m"
 
-DATA_DIR = Path.home() / ".repforge"
+DATA_DIR = Path(os.environ.get("REPFORGE_HOME", str(Path.home() / ".repforge")))
 AGENTS_FILE = DATA_DIR / "agents.json"
 LEDGER_FILE = DATA_DIR / "ledger.jsonl"
 VOUCH_FILE  = DATA_DIR / "vouches.jsonl"
+IDENTITY_KEY_FILE = DATA_DIR / "identity.key"
+IDENTITY_PUB_FILE = DATA_DIR / "identity.pub"
 
 # ── Data helpers ──────────────────────────────────────────────
 def ensure_dir():
@@ -60,12 +72,6 @@ def load_ledger():
         return entries
     return []
 
-def append_ledger(entry):
-    ensure_dir()
-    entry["hash"] = hashlib.sha256(json.dumps(entry, sort_keys=True).encode()).hexdigest()[:16]
-    with open(LEDGER_FILE, "a") as f:
-        f.write(json.dumps(entry) + "\n")
-
 def load_vouches():
     ensure_dir()
     if VOUCH_FILE.exists():
@@ -76,11 +82,80 @@ def load_vouches():
         return vouches
     return []
 
-def append_vouch(entry):
+# ── Identity / signing (Ed25519) ──────────────────────────────
+def _canonical(entry):
+    """Deterministic bytes for hashing + signing: every field except the
+    integrity fields themselves (hash, sig). prev_hash IS included, so the
+    chain link is covered by both the hash and the signature."""
+    d = {k: v for k, v in entry.items() if k not in ("hash", "sig")}
+    return json.dumps(d, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+def _generate_identity():
+    """Create a fresh Ed25519 keypair and persist it. Returns the public key hex."""
+    sk = SigningKey.generate()
+    key_hex = sk.encode(encoder=HexEncoder).decode("ascii")
+    pub_hex = sk.verify_key.encode(encoder=HexEncoder).decode("ascii")
+    IDENTITY_KEY_FILE.write_text(key_hex + "\n")
+    IDENTITY_PUB_FILE.write_text(pub_hex + "\n")
+    os.chmod(IDENTITY_KEY_FILE, 0o600)  # private key readable only by owner
+    return pub_hex
+
+def ensure_identity():
+    """Return the public key hex, generating an identity on first use."""
+    if not IDENTITY_KEY_FILE.exists():
+        pub = _generate_identity()
+        print(f"  {GOLD}Generated new signing identity (Ed25519).{RST}")
+        print(f"  {DIM}Public key:  {pub}{RST}")
+        print(f"  {DIM}Private key: {DATA_DIR}/identity.key — your trust anchor. Losing it invalidates new entries.{RST}")
+        return pub
+    return IDENTITY_PUB_FILE.read_text().strip()
+
+def _public_key_hex():
+    if IDENTITY_PUB_FILE.exists():
+        return IDENTITY_PUB_FILE.read_text().strip()
+    return ""
+
+def _sign_bytes(data):
+    """Detached Ed25519 signature over raw bytes, base64-encoded."""
+    sk = SigningKey(IDENTITY_KEY_FILE.read_text().strip(), encoder=HexEncoder)
+    return base64.b64encode(sk.sign(data).signature).decode("ascii")
+
+def _verify_sig(data, sig_b64, pubkey_hex):
+    """True if `data` was signed by the key matching `pubkey_hex`."""
+    try:
+        vk = VerifyKey(pubkey_hex, encoder=HexEncoder)
+        vk.verify(data, base64.b64decode(sig_b64))
+        return True
+    except Exception:
+        return False
+
+def append_ledger(entry):
+    """Append a hash-chained, signed ledger entry."""
     ensure_dir()
-    with open(VOUCH_FILE, "a") as f:
+    ensure_identity()
+    ledger = load_ledger()
+    prev_hash = ledger[-1].get("hash", "") if ledger else ""
+    entry["prev_hash"] = prev_hash
+    entry["pubkey"] = _public_key_hex()
+    payload = _canonical(entry)
+    entry["hash"] = hashlib.sha256(payload).hexdigest()
+    entry["sig"] = _sign_bytes(payload)
+    with open(LEDGER_FILE, "a") as f:
         f.write(json.dumps(entry) + "\n")
 
+def append_vouch(entry):
+    """Append a hash-chained, signed vouch edge."""
+    ensure_dir()
+    ensure_identity()
+    vouches = load_vouches()
+    prev_hash = vouches[-1].get("hash", "") if vouches else ""
+    entry["prev_hash"] = prev_hash
+    entry["pubkey"] = _public_key_hex()
+    payload = _canonical(entry)
+    entry["hash"] = hashlib.sha256(payload).hexdigest()
+    entry["sig"] = _sign_bytes(payload)
+    with open(VOUCH_FILE, "a") as f:
+        f.write(json.dumps(entry) + "\n")
 
 # ── Reputation scoring ────────────────────────────────────────
 def bayesian_score(successes, total):
@@ -92,25 +167,25 @@ def compute_reputation(agent_id):
     """Compute full reputation profile for an agent."""
     ledger = load_ledger()
     vouches = load_vouches()
-    
+
     outcomes = [e for e in ledger if e.get("agent_id") == agent_id]
     total = len(outcomes)
     successes = sum(1 for e in outcomes if e.get("outcome") == "success")
     failures = sum(1 for e in outcomes if e.get("outcome") == "failure")
-    
+
     score = bayesian_score(successes, total) if total > 0 else 0.5
-    
+
     # Vouch graph
     vouched_by = [v for v in vouches if v.get("target") == agent_id]
     vouched_for = [v for v in vouches if v.get("source") == agent_id]
-    
+
     # Weighted vouch score: each vouch from a high-rep agent counts more
     vouch_score = 0
     for v in vouched_by:
         source = v.get("source")
         source_rep = compute_reputation(source)["score"]
         vouch_score += source_rep * v.get("weight", 1.0)
-    
+
     # Category breakdown
     by_category = defaultdict(lambda: {"total": 0, "successes": 0})
     for e in outcomes:
@@ -118,11 +193,11 @@ def compute_reputation(agent_id):
         by_category[cat]["total"] += 1
         if e.get("outcome") == "success":
             by_category[cat]["successes"] += 1
-    
+
     categories = {}
     for cat, stats in by_category.items():
         categories[cat] = round(bayesian_score(stats["successes"], stats["total"]), 3)
-    
+
     return {
         "agent_id": agent_id,
         "score": round(score, 4),
@@ -146,24 +221,41 @@ def reputation_tier(score):
 
 
 # ── Commands ─────────────────────────────────────────────────
+def cmd_keygen():
+    """Generate (or show) the Ed25519 signing identity."""
+    if not NACL_AVAILABLE:
+        print(f"  {RED}PyNaCl is required for signing. Install it:{RST} pip install pynacl")
+        return
+    if IDENTITY_KEY_FILE.exists() and "--rotate" not in sys.argv:
+        print(f"\n  {WHT}{BLD}Signing Identity{RST}\n")
+        print(f"  {BLD}Public key:{RST} {WHT}{_public_key_hex()}{RST}")
+        print(f"  {DIM}Already have an identity. Use `keygen --rotate` to mint a new one{RST}")
+        print(f"  {DIM}(old entries stay verifiable — each is signed with the key embedded in it).{RST}")
+        return
+    pub = _generate_identity()
+    print(f"\n  {GRN}✓ Identity key generated.{RST}")
+    print(f"  {BLD}Public key:{RST} {WHT}{pub}{RST}")
+    print(f"  {DIM}Private key: {DATA_DIR}/identity.key (mode 600).{RST}")
+
+
 def cmd_register():
     """Register a new agent."""
     print(f"\n  {WHT}{BLD}Register Agent{RST}\n")
-    
+
     agent_id = input(f"  {BLD}Agent ID{RST}: ").strip()
     if not agent_id:
         print(f"  {RED}Agent ID required.{RST}")
         return
-    
+
     agents = load_agents()
     if agent_id in agents:
         print(f"  {GOLD}⚠ Agent '{agent_id}' already registered.{RST}")
         return
-    
+
     name = input(f"  {BLD}Display name{RST}: ").strip()
     provider = input(f"  {BLD}Provider/creator{RST} {DIM}(optional){RST}: ").strip()
     url = input(f"  {BLD}URL or repo{RST} {DIM}(optional){RST}: ").strip()
-    
+
     agents[agent_id] = {
         "name": name or agent_id,
         "provider": provider,
@@ -171,7 +263,7 @@ def cmd_register():
         "registered": datetime.now(timezone.utc).isoformat(),
         "status": "active"
     }
-    
+
     save_agents(agents)
     print(f"\n  {GRN}✓ Agent '{agent_id}' registered.{RST}")
     print(f"  {DIM}Log outcomes with: repforge log {agent_id}{RST}")
@@ -179,36 +271,40 @@ def cmd_register():
 
 def cmd_log():
     """Log a task outcome for an agent."""
+    if not NACL_AVAILABLE:
+        print(f"  {RED}PyNaCl is required for signing. Install it:{RST} pip install pynacl")
+        return
+
     agents = load_agents()
-    
+
     if not agents:
         print(f"  {DIM}No agents registered. Register one first:{RST} repforge register")
         return
-    
+
     print(f"\n  {WHT}{BLD}Log Task Outcome{RST}\n")
-    
+
     print(f"  {DIM}Registered agents:{RST}")
     for aid, info in agents.items():
         print(f"  {CYN}•{RST} {aid} {DIM}({info.get('name', '')}){RST}")
-    
+
     agent_id = input(f"\n  {BLD}Agent ID{RST}: ").strip()
     if agent_id not in agents:
         print(f"  {RED}Agent not found. Register first.{RST}")
         return
-    
+
     print(f"\n  {DIM}Outcome:{RST}")
     print(f"  {GRN}1{RST}) success")
     print(f"  {RED}2{RST}) failure")
     print(f"  {GRAY}3{RST}) partial")
-    
+
     choice = input(f"  {BLD}Choice{RST} {DIM}[1]{RST}: ").strip() or "1"
     outcome_map = {"1": "success", "2": "failure", "3": "partial"}
     outcome = outcome_map.get(choice, "success")
-    
+
     category = input(f"  {BLD}Category{RST} {DIM}[general]{RST}: ").strip() or "general"
     task = input(f"  {BLD}Task description{RST} {DIM}(optional){RST}: ").strip()
     cost = input(f"  {BLD}Cost (credits){RST} {DIM}(optional){RST}: ").strip()
-    
+
     entry = {
         "agent_id": agent_id,
         "outcome": outcome,
@@ -217,22 +313,22 @@ def cmd_log():
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "cost": float(cost) if cost else None
     }
-    
+
     append_ledger(entry)
-    
+
     rep = compute_reputation(agent_id)
     print(f"\n  {GRN}✓ Outcome logged.{RST}")
-    print(f"  {DIM}Updated reputation: {reputation_tier(rep['score'])} {DIM}({rep['score']:.3f}){RST}")
+    print(f"  {DIM}Updated rep: {reputation_tier(rep['score'])} {DIM}({rep['score']:.3f}){RST}")
 
 
 def cmd_reputation():
     """Show agent reputation."""
     agents = load_agents()
-    
+
     if not agents:
         print(f"  {DIM}No agents registered.{RST}")
         return
-    
+
     # If agent ID provided as argument
     if len(sys.argv) > 2:
         agent_id = sys.argv[2]
@@ -241,24 +337,24 @@ def cmd_reputation():
             return
         _show_agent_reputation(agent_id, agents)
         return
-    
+
     # Show all
     print(f"\n  {WHT}{BLD}╔══════════════════════════════════════════════════╗{RST}")
-    print(f"  {WHT}{BLD}║{RST}  ⚖  REPUTATION REGISTRY{' ' * 28}{WHT}{BLD}║{RST}")
+    print(f"  {WHT}{BLD}║{RST}  ⚖  REP REGISTRY{' ' * 33}{WHT}{BLD}║{RST}")
     print(f"  {WHT}{BLD}╚══════════════════════════════════════════════════╝{RST}")
     print()
-    
+
     rows = []
     for agent_id in agents:
         rep = compute_reputation(agent_id)
         rows.append((agent_id, rep))
-    
+
     # Sort by score descending
     rows.sort(key=lambda r: r[1]["score"], reverse=True)
-    
+
     print(f"  {GRAY}{'Agent':<25} {'Tier':>20}  {'Score':>7}  {'Tasks':>5}{RST}")
     print(f"  {DIM}{'─'*60}{RST}")
-    
+
     for agent_id, rep in rows:
         tier = reputation_tier(rep["score"])
         print(f"  {WHT}{agent_id:<25}{RST} {tier}  {rep['score']:>7.3f}  {rep['total_tasks']:>5}")
@@ -268,7 +364,7 @@ def _show_agent_reputation(agent_id, agents):
     """Detailed view for a single agent."""
     rep = compute_reputation(agent_id)
     info = agents.get(agent_id, {})
-    
+
     print(f"\n  {WHT}{BLD}╔══════════════════════════════════════════════════╗{RST}")
     print(f"  {WHT}{BLD}║{RST}  ⚖  AGENT PROFILE{' ' * 33}{WHT}{BLD}║{RST}")
     print(f"  {WHT}{BLD}╚══════════════════════════════════════════════════╝{RST}")
@@ -278,7 +374,7 @@ def _show_agent_reputation(agent_id, agents):
     print(f"  {BLD}Provider:{RST}      {info.get('provider', '—')}")
     print(f"  {BLD}Registered:{RST}    {info.get('registered', '—')[:19]}")
     print()
-    print(f"  {BLD}Reputation:{RST}     {reputation_tier(rep['score'])} {DIM}({rep['score']:.4f}){RST}")
+    print(f"  {BLD}Rep:{RST}            {reputation_tier(rep['score'])} {DIM}({rep['score']:.4f}){RST}")
     print(f"  {BLD}Tasks:{RST}          {rep['total_tasks']} total")
     print(f"  {CYN}├─ Success:{RST}      {rep['successes']}")
     print(f"  {CYN}├─ Failure:{RST}      {rep['failures']}")
@@ -287,10 +383,10 @@ def _show_agent_reputation(agent_id, agents):
     print(f"  {BLD}Trust Graph{RST}")
     print(f"  {CYN}├─ Vouched by:{RST}   {rep['vouched_by']} agents")
     print(f"  {CYN}└─ Vouched for:{RST}  {rep['vouched_for']} agents")
-    
+
     if rep["vouch_weight"] > 0:
         print(f"\n  {BLD}Vouch Weight:{RST}   {rep['vouch_weight']:.2f}")
-    
+
     if rep["categories"]:
         print(f"\n  {BLD}By Category{RST}")
         for cat, score in sorted(rep["categories"].items()):
@@ -300,50 +396,114 @@ def _show_agent_reputation(agent_id, agents):
 
 def cmd_vouch():
     """Vouch for an agent."""
+    if not NACL_AVAILABLE:
+        print(f"  {RED}PyNaCl is required for signing. Install it:{RST} pip install pynacl")
+        return
+
     agents = load_agents()
-    
+
     if len(agents) < 2:
         print(f"  {DIM}Need at least 2 registered agents to vouch.{RST}")
         return
-    
+
     print(f"\n  {WHT}{BLD}Vouch for an Agent{RST}\n")
-    
+
     print(f"  {DIM}Registered agents:{RST}")
     for aid in agents:
         rep = compute_reputation(aid)
         print(f"  {CYN}•{RST} {aid} {DIM}(score: {rep['score']:.3f}){RST}")
-    
+
     source = input(f"\n  {BLD}Your agent ID (vouching){RST}: ").strip()
     if source not in agents:
         print(f"  {RED}Agent not found.{RST}")
         return
-    
+
     target = input(f"  {BLD}Agent ID (being vouched for){RST}: ").strip()
     if target not in agents:
         print(f"  {RED}Agent not found.{RST}")
         return
-    
+
     if source == target:
         print(f"  {RED}Cannot vouch for yourself.{RST}")
         return
-    
+
     weight = input(f"  {BLD}Confidence weight{RST} {DIM}[1.0] (0.0-2.0){RST}: ").strip() or "1.0"
-    
+
     vouch = {
         "source": source,
         "target": target,
         "weight": float(weight),
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
-    
+
     append_vouch(vouch)
     print(f"\n  {GRN}✓ {source} → {target} (weight: {weight}){RST}")
+
+
+def cmd_verify():
+    """Verify chain integrity + signatures of the ledger and vouches."""
+    if not NACL_AVAILABLE:
+        print(f"  {RED}PyNaCl is required for verification. Install it:{RST} pip install pynacl")
+        return
+
+    expected_pub = _public_key_hex()
+    if not expected_pub:
+        print(f"  {DIM}No signing identity yet. Nothing to verify.{RST}")
+        return
+
+    ledger = load_ledger()
+    vouches = load_vouches()
+    errors = []
+
+    for i, e in enumerate(ledger):
+        payload = _canonical(e)
+        if e.get("hash") != hashlib.sha256(payload).hexdigest():
+            errors.append(f"ledger[{i}]: content hash mismatch")
+        expect_prev = ledger[i - 1].get("hash") if i > 0 else ""
+        if e.get("prev_hash") != expect_prev:
+            errors.append(f"ledger[{i}]: chain link broken")
+        if not e.get("sig"):
+            errors.append(f"ledger[{i}]: unsigned entry")
+        elif e.get("pubkey") != expected_pub:
+            errors.append(f"ledger[{i}]: signed by unknown key")
+        elif not _verify_sig(payload, e["sig"], expected_pub):
+            errors.append(f"ledger[{i}]: invalid signature")
+
+    for i, v in enumerate(vouches):
+        payload = _canonical(v)
+        if v.get("hash") != hashlib.sha256(payload).hexdigest():
+            errors.append(f"vouch[{i}]: content hash mismatch")
+        expect_prev = vouches[i - 1].get("hash") if i > 0 else ""
+        if v.get("prev_hash") != expect_prev:
+            errors.append(f"vouch[{i}]: chain link broken")
+        if not v.get("sig"):
+            errors.append(f"vouch[{i}]: unsigned entry")
+        elif v.get("pubkey") != expected_pub:
+            errors.append(f"vouch[{i}]: signed by unknown key")
+        elif not _verify_sig(payload, v["sig"], expected_pub):
+            errors.append(f"vouch[{i}]: invalid signature")
+
+    print(f"\n  {WHT}{BLD}╔══════════════════════════════════════════════════╗{RST}")
+    print(f"  {WHT}{BLD}║{RST}  ⚖  LEDGER VERIFY{' ' * 33}{WHT}{BLD}║{RST}")
+    print(f"  {WHT}{BLD}╚══════════════════════════════════════════════════╝{RST}")
+    print()
+    print(f"  {BLD}Ledger entries:{RST} {len(ledger)}   {BLD}Vouches:{RST} {len(vouches)}")
+    print(f"  {BLD}Identity key:{RST}  {DIM}{expected_pub[:16]}…{RST}")
+
+    if not errors:
+        print(f"\n  {GRN}✓ Integrity OK — chain intact, all signatures valid.{RST}")
+        return
+
+    print(f"\n  {RED}✗ {len(errors)} integrity problem(s) detected:{RST}")
+    for err in errors:
+        print(f"  {RED}• {err}{RST}")
+    sys.exit(1)
 
 
 def cmd_audit():
     """Show audit trail for an agent."""
     agents = load_agents()
-    
+
     if len(sys.argv) > 2:
         agent_id = sys.argv[2]
     else:
@@ -351,24 +511,26 @@ def cmd_audit():
         for aid in agents:
             print(f"  {CYN}•{RST} {aid}")
         agent_id = input(f"\n  {BLD}Agent ID to audit{RST}: ").strip()
-    
+
     ledger = load_ledger()
     entries = [e for e in ledger if e.get("agent_id") == agent_id]
-    
+
     if not entries:
         print(f"  {DIM}No ledger entries for '{agent_id}'.{RST}")
         return
-    
+
     print(f"\n  {WHT}{BLD}Audit Trail: {agent_id}{RST}")
     print(f"  {DIM}{len(entries)} entries{RST}\n")
-    
+
     for i, e in enumerate(entries[-20:], 1):
         outcome_color = GRN if e.get("outcome") == "success" else (RED if e.get("outcome") == "failure" else GOLD)
         ts = e.get("timestamp", "")[:19]
         cat = e.get("category", "—")
         task = (e.get("task") or "")[:40]
         h = e.get("hash", "—")
-        
+        if len(h) > 16:
+            h = h[:16] + "…"
+
         print(f"  {GRAY}{i:>3}.{RST} {outcome_color}{e.get('outcome', '?'):<8}{RST} {DIM}{ts}{RST}  {cat:<15}")
         if task:
             print(f"      {DIM}{task}{RST}")
@@ -380,16 +542,16 @@ def cmd_trust_graph():
     """Display the trust graph."""
     agents = load_agents()
     vouches = load_vouches()
-    
+
     if not vouches:
         print(f"  {DIM}No vouches recorded yet.{RST}")
         return
-    
+
     print(f"\n  {WHT}{BLD}╔══════════════════════════════════════════════════╗{RST}")
     print(f"  {WHT}{BLD}║{RST}  ⚖  TRUST GRAPH{' ' * 35}{WHT}{BLD}║{RST}")
     print(f"  {WHT}{BLD}╚══════════════════════════════════════════════════╝{RST}")
     print()
-    
+
     for v in vouches:
         source_rep = compute_reputation(v["source"])["score"]
         print(f"  {WHT}{v['source']}{RST} {GOLD}──{v['weight']}──▶{RST} {WHT}{v['target']}{RST}  {DIM}(source rep: {source_rep:.3f}){RST}")
@@ -398,8 +560,8 @@ def cmd_trust_graph():
 def print_banner():
     print(f"""
 {GRAY}┌─────────────────────────────────────────────────┐
-│{RST}  {BLD}⚖  REPFORGE{RST}  {DIM}v1.0 — Agent Reputation Ledger{GRAY}        │
-│{RST}  {DIM}Register. Log. Score. Trust. Audit.{GRAY}                  │
+│{RST}  {BLD}⚖  REPFORGE{RST}  {DIM}v2.0 — Agent Reputation Ledger{GRAY}        │
+│{RST}  {DIM}Register. Log. Score. Trust. Verify.{GRAY}               │
 └─────────────────────────────────────────────────┘{RST}
 """)
 
@@ -410,33 +572,42 @@ def print_help():
   repforge {DIM}<command> [args]{RST}
 
 {WHT}COMMANDS{RST}
+  {GOLD}keygen{RST}        Generate (or show) your Ed25519 signing identity
   {GOLD}register{RST}     Register a new agent
-  {GOLD}log{RST}          Log a task outcome
-  {GOLD}reputation{RST}   Show reputation registry [agent_id]
-  {GOLD}vouch{RST}         Vouch for another agent
+  {GOLD}log{RST}          Log a task outcome (signed)
+  {GOLD}reputation{RST}   Show the rep registry [agent_id]
+  {GOLD}vouch{RST}         Vouch for another agent (signed)
+  {GOLD}verify{RST}        Verify chain integrity + signatures
   {GOLD}audit{RST}         Show audit trail [agent_id]
   {GOLD}trust{RST}         Display trust graph
 
 {WHT}EXAMPLES{RST}
+  {DIM}# Mint your signing identity (auto-created on first log):{RST}
+  repforge keygen
+
   {DIM}# Register an agent:{RST}
   repforge register
 
   {DIM}# Log a task outcome:{RST}
   repforge log
 
-  {DIM}# Check reputation:{RST}
+  {DIM}# Check an agent's rep:{RST}
   repforge reputation gpt-assistant-1
 
-  {DIM}# Audit trail:{RST}
-  repforge audit gpt-assistant-1
+  {DIM}# Prove nothing was tampered with:{RST}
+  repforge verify
 
 {WHT}REPUTATION FORMULA{RST}
   Bayesian score: {DIM}(successes + 1) / (total + 2){RST}
   Prevents 1/1 from being 100%. Converges with data.
 
+{WHT}SECURITY{RST}
+  Every entry is Ed25519-signed and hash-chained ({DIM}prev_hash{RST}).
+  Requires PyNaCl: {DIM}pip install pynacl{RST}
+
 {WHT}DATA{RST}
   Stored in {DIM}~/.repforge/{RST}
-  JSONL ledger for auditability. Every entry hashed.
+  Signed, tamper-evident JSONL ledger.
 """)
 
 
@@ -445,12 +616,15 @@ def main():
         print_banner()
         print_help()
         return
-    
+
     cmd = sys.argv[1].lower()
-    
+
     if cmd in ('-h', '--help', 'help'):
         print_banner()
         print_help()
+    elif cmd == 'keygen':
+        print_banner()
+        cmd_keygen()
     elif cmd == 'register':
         print_banner()
         cmd_register()
@@ -463,6 +637,9 @@ def main():
     elif cmd == 'vouch':
         print_banner()
         cmd_vouch()
+    elif cmd == 'verify':
+        print_banner()
+        cmd_verify()
     elif cmd == 'audit':
         print_banner()
         cmd_audit()

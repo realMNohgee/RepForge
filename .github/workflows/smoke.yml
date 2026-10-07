@@ -18,37 +18,53 @@ jobs:
         with:
           python-version: '3.9'
 
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
       - name: Compile check
         run: python3 -m py_compile repforge.py
 
       - name: Help
         run: python3 repforge.py --help
 
-      - name: Smoke sequence (register -> log -> trust)
+      - name: Smoke sequence (register -> log -> vouch -> verify)
         run: |
           set -euo pipefail
 
-          # Isolate the ledger in a throwaway HOME so the runner stays clean.
-          export HOME="$(mktemp -d)"
+          # Isolate the ledger in a throwaway REPFORGE_HOME so the runner stays clean.
+          # (Do NOT override HOME — the user-site packages must stay reachable.)
+          export REPFORGE_HOME="$(mktemp -d)"
 
-          # 1) Register a sample agent (interactive prompts fed via stdin:
+          # 1) Register two sample agents (interactive prompts fed via stdin:
           #    id, display name, provider, url).
           printf 'smoke-agent\nSmoke Agent\nCI\nhttps://example.com/smoke\n' \
             | python3 repforge.py register
+          printf 'smoke-peer\nPeer Agent\nCI\nhttps://example.com/peer\n' \
+            | python3 repforge.py register
 
-          # 2) Log a couple of outcomes (id, choice 1=success/2=failure,
-          #    category, task, cost).
+          # 2) Log outcomes (id, choice 1=success/2=failure, category, task, cost).
+          #    First log auto-generates the Ed25519 signing identity.
           printf 'smoke-agent\n1\nsmoke\nCI smoke success\n0.0\n' \
             | python3 repforge.py log
           printf 'smoke-agent\n2\nsmoke\nCI smoke failure\n0.0\n' \
             | python3 repforge.py log
+          printf 'smoke-peer\n1\nsmoke\nCI peer success\n0.0\n' \
+            | python3 repforge.py log
 
-          # 3) Compute trust (Bayesian reputation) and audit the ledger.
+          # 3) Vouch (source, target, weight).
+          printf 'smoke-peer\nsmoke-agent\n0.8\n' \
+            | python3 repforge.py vouch
+
+          # 4) Verify the ledger is intact (exits non-zero if tampered).
+          python3 repforge.py verify
+
+          # 5) Compute trust (Bayesian reputation) and audit the ledger.
           python3 repforge.py reputation
           python3 repforge.py reputation smoke-agent
           python3 repforge.py audit smoke-agent
 
-          # 4) Sanity-check that the ledger was actually written.
-          test -s "$HOME/.repforge/ledger.jsonl"
+          # 6) Sanity-check that the signed ledger was actually written.
+          test -s "$REPFORGE_HOME/ledger.jsonl"
+          test -s "$REPFORGE_HOME/identity.key"
 
           echo "Smoke sequence complete."
