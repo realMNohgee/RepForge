@@ -1,26 +1,27 @@
-![CI](https://github.com/realMNohgee/RepForge/actions/workflows/ci.yml/badge.svg) ![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg) ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-<p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.0-gold?style=for-the-badge" alt="version">
-  <img src="https://img.shields.io/badge/python-3.10+-blue?style=for-the-badge" alt="python">
-  <img src="https://img.shields.io/badge/deps-zero-success?style=for-the-badge" alt="zero dependencies">
-  <img src="https://img.shields.io/badge/license-MIT-yellow?style=for-the-badge" alt="license">
-</p>
+[![CI](https://github.com/realMNohgee/RepForge/actions/workflows/smoke.yml/badge.svg)](https://github.com/realMNohgee/RepForge/actions/workflows/smoke.yml)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-blue.svg)
 
-<h1 align="center">⚖ RepForge</h1>
-<h3 align="center">Agent Reputation Ledger & Trust Registry</h3>
+# ⚖ RepForge
 
-<p align="center">
-  <i>Register agents. Log outcomes. Build verifiable reputation.<br>
-  The credit bureau for AI agents.</i>
-</p>
+**A local, file-based reputation ledger for AI agents — register agents, log outcomes, and compute tamper-evident Bayesian trust scores. Zero dependencies.**
+
+RepForge is the credit bureau for your agent fleet. Every task outcome is written to an append-only, SHA-256-hashed JSONL ledger; every agent gets a Bayesian trust score that converges to its true reliability as evidence accumulates; and agents can vouch for one another to form a weighted trust graph. It runs entirely offline — no server, no account, no network.
 
 ---
 
 ## ✨ Why RepForge?
 
-You chain 5 agents to complete a task. One consistently fails. One quietly excels. Without a reputation system, you discover this the hard way — after the failed task.
+You chain five agents to complete a task. One consistently fails. One quietly excels. Without a reputation system, you find out the hard way — *after* the task breaks.
 
-RepForge gives every agent a **Bayesian trust score** that converges to their true reliability over time. Vouch for agents you've worked with. Audit every outcome. Build trust graphs across your entire agent fleet.
+RepForge turns "which agent should I trust?" into a number you can audit:
+
+- **Bayesian scoring** — `(successes + 1) / (total + 2)`. A single success is *not* 100%; the score converges to the true success rate as data accumulates, so agents can't game it with one lucky run.
+- **Tamper-evident audit trail** — every outcome is appended to a JSONL ledger with a SHA-256 hash.
+- **Weighted trust graph** — agents vouch for each other; a vouch's weight is scaled by the voucher's own reputation.
+- **Per-category breakdowns** — separate reliability for `code-review` vs. `research` vs. anything else.
+- **Tiered rankings** — Unproven → Bronze → Silver → Gold → Diamond.
+- **Zero dependencies** — pure Python 3.8+ standard library. Data lives in `~/.repforge/`.
 
 ## ⚖ The Scoring Formula
 
@@ -28,92 +29,237 @@ RepForge gives every agent a **Bayesian trust score** that converges to their tr
 score = (successes + 1) / (total + 2)
 ```
 
-A Bayesian prior. An agent with 1 success out of 1 task scores **0.667** — not 1.0. This prevents gaming and converges to the true rate as data accumulates.
+A Bayesian prior (Beta(1,1)) over the success rate. It prevents "1 for 1 = perfect" gaming and tightens toward the true rate with more evidence:
 
-| Outcomes | Score | Why |
-|----------|-------|-----|
-| 1/1 success | 0.667 | Untrustworthy — not enough data |
-| 5/5 success | 0.857 | Promising — consistent track record |
-| 50/50 success | 0.981 | Diamond tier — proven reliability |
-| 5/10 success | 0.500 | Unreliable — 50% fail rate |
+| Outcomes | Score | Reading |
+|----------|-------|---------|
+| 1 / 1 | 0.667 | Untrustworthy — not enough data |
+| 5 / 5 | 0.857 | Promising — consistent track record |
+| 3 / 3 | 0.800 | Gold-ish — small sample |
+| 50 / 50 | 0.981 | Diamond tier — proven reliability |
+| 5 / 10 | 0.500 | Unreliable — coin-flip |
 
 ## 🚀 Quick Start
 
+No install, no dependencies — clone and run:
+
 ```bash
-# Register agents
-python repforge.py register
-
-# Log outcomes
-python repforge.py log
-
-# View reputation registry
-python repforge.py reputation
-
-# Drill into one agent
-python repforge.py reputation my-agent
-
-# Audit trail (every entry hashed)
-python repforge.py audit my-agent
-
-# Build trust graph
-python repforge.py vouch
-python repforge.py trust
+git clone https://github.com/realMNohgee/RepForge.git
+cd RepForge
+python3 repforge.py --help
 ```
 
-## 🏛 The Reputation Registry
-
 ```
-╔══════════════════════════════════════════════════╗
-║  ⚖  REPUTATION REGISTRY                         ║
-╚══════════════════════════════════════════════════╝
+┌─────────────────────────────────────────────────┐
+│  ⚖  REPFORGE  v1.0 — Agent Reputation Ledger        │
+│  Register. Log. Score. Trust. Audit.                  │
+└─────────────────────────────────────────────────┘
 
-Agent                     Tier           Score  Tasks
-────────────────────────────────────────────────────────
-code-reviewer-bot     ◆◆◆ Diamond        0.981     50
-research-agent        ◆◆ Gold            0.857      5
-data-pipeline         ◆ Silver           0.750     12
-summarizer-v2         ◇ Bronze           0.600     20
-new-experimental      ○ Unproven         0.500      0
+
+USAGE
+  repforge <command> [args]
+
+COMMANDS
+  register     Register a new agent
+  log          Log a task outcome
+  reputation   Show reputation registry [agent_id]
+  vouch         Vouch for another agent
+  audit         Show audit trail [agent_id]
+  trust         Display trust graph
+
+EXAMPLES
+  # Register an agent:
+  repforge register
+
+  # Log a task outcome:
+  repforge log
+
+  # Check reputation:
+  repforge reputation gpt-assistant-1
+
+  # Audit trail:
+  repforge audit gpt-assistant-1
+
+REPUTATION FORMULA
+  Bayesian score: (successes + 1) / (total + 2)
+  Prevents 1/1 from being 100%. Converges with data.
+
+DATA
+  Stored in ~/.repforge/
+  JSONL ledger for auditability. Every entry hashed.
 ```
 
-## 🔗 Trust Graph
+## 🧭 Command Tour
 
-Agents vouch for each other. Vouch weight is multiplied by the vouching agent's own reputation — so a Diamond-tier agent's vouch carries more weight than an Unproven agent's.
+Every block below is real captured output (ANSI colors stripped; the `REPFORGE` banner is omitted after the first command for brevity).
 
+### `register` — add an agent
+
+```console
+$ python3 repforge.py register
+
+  Register Agent
+
+  Agent ID:   Display name:   Provider/creator (optional):   URL or repo (optional): 
+  ✓ Agent 'code-reviewer-bot' registered.
+  Log outcomes with: repforge log code-reviewer-bot
 ```
-code-reviewer ──1.0──▶ research-agent
-       │                    │
-       └──0.5──▶ data-pipeline
+
+> Prompts read `Agent ID`, `Display name`, `Provider/creator`, and `URL or repo`. Here the answers were `code-reviewer-bot`, `Code Reviewer Bot`, `Nous Research`, `https://github.com/realMNohgee/RepForge`.
+
+### `log` — record a task outcome
+
+```console
+$ python3 repforge.py log
+
+  Log Task Outcome
+
+  Registered agents:
+  • code-reviewer-bot (Code Reviewer Bot)
+  • research-agent (Research Agent)
+
+  Agent ID: 
+  Outcome:
+  1) success
+  2) failure
+  3) partial
+  Choice [1]:   Category [general]:   Task description (optional):   Cost (credits) (optional): 
+  ✓ Outcome logged.
+  Updated reputation: ◇ Bronze (0.667)
 ```
 
-## 🔍 Audit Trail
+> Choices were `code-reviewer-bot` → `success` → category `code-review` → task `"Review PR #142 for race conditions"` → cost `0.5`. The updated tier is printed immediately after logging.
 
-Every outcome is logged to a JSONL ledger with a SHA-256 hash. Tamper-evident. Importable. Auditable.
+### `reputation` — the registry
+
+```console
+$ python3 repforge.py reputation
+
+  ╔══════════════════════════════════════════════════╗
+  ║  ⚖  REPUTATION REGISTRY                            ║
+  ╚══════════════════════════════════════════════════╝
+
+  Agent                                     Tier    Score  Tasks
+  ────────────────────────────────────────────────────────────
+  research-agent            ◇ Bronze    0.667      1
+  code-reviewer-bot         ◇ Bronze    0.600      3
+```
+
+### `reputation <agent_id>` — a single agent's profile
+
+```console
+$ python3 repforge.py reputation code-reviewer-bot
+
+  ╔══════════════════════════════════════════════════╗
+  ║  ⚖  AGENT PROFILE                                 ║
+  ╚══════════════════════════════════════════════════╝
+
+  Agent ID:      code-reviewer-bot
+  Name:          Code Reviewer Bot
+  Provider:      Nous Research
+  Registered:    2026-10-07T18:09:04
+
+  Reputation:     ◇ Bronze (0.6000)
+  Tasks:          3 total
+  ├─ Success:      2
+  ├─ Failure:      0
+  └─ Partial:      1
+
+  Trust Graph
+  ├─ Vouched by:   0 agents
+  └─ Vouched for:  1 agents
+
+  By Category
+  code-review          ████████████░░░░░░░░ 0.600
+```
+
+### `vouch` — build the trust graph
+
+```console
+$ python3 repforge.py vouch
+
+  Vouch for an Agent
+
+  Registered agents:
+  • code-reviewer-bot (score: 0.600)
+  • research-agent (score: 0.667)
+
+  Your agent ID (vouching):   Agent ID (being vouched for):   Confidence weight [1.0] (0.0-2.0): 
+  ✓ code-reviewer-bot → research-agent (weight: 0.8)
+```
+
+### `trust` — render the trust graph
+
+```console
+$ python3 repforge.py trust
+
+  ╔══════════════════════════════════════════════════╗
+  ║  ⚖  TRUST GRAPH                                   ║
+  ╚══════════════════════════════════════════════════╝
+
+  code-reviewer-bot ──0.8──▶ research-agent  (source rep: 0.600)
+```
+
+### `audit` — the hashed audit trail
+
+```console
+$ python3 repforge.py audit code-reviewer-bot
+
+  Audit Trail: code-reviewer-bot
+  3 entries
+
+    1. success  2026-10-07T18:09:04  code-review    
+      Review PR #142 for race conditions
+      hash: 75671a46e510dcf8
+
+    2. success  2026-10-07T18:09:04  code-review    
+      Review PR #143 refactor
+      hash: 75e1d8f25ba3e6a9
+
+    3. partial  2026-10-07T18:09:04  code-review    
+      Review docs-only PR
+      hash: 19491546e0afb791
+```
+
+## 🗄 Data Format
+
+Everything lives under `~/.repforge/`:
+
+| File | Purpose |
+|------|---------|
+| `agents.json` | Registered agents (id → name, provider, url, status) |
+| `ledger.jsonl` | Append-only outcome log; one JSON object per line, each with a SHA-256 `hash` |
+| `vouches.jsonl` | Append-only vouch edges (`source → target`, weight, timestamp) |
+
+Each ledger line is self-describing and importable:
 
 ```json
-{"agent_id": "code-reviewer-bot", "outcome": "success", "category": "code-review", "timestamp": "2026-07-28T14:22:00Z", "hash": "a3f8c2d1e4b5"}
+{"agent_id": "code-reviewer-bot", "outcome": "success", "category": "code-review", "task": "Review PR #142 for race conditions", "timestamp": "2026-10-07T18:09:04.626454+00:00", "cost": 0.5, "hash": "75671a46e510dcf8"}
 ```
 
-## 🎯 Features
+## 🧪 Testing / CI
 
-- **Bayesian scoring** — (successes+1)/(total+2). Prevents gaming, converges with data.
-- **Trust graph** — Agents vouch for each other with confidence weights
-- **Category breakdown** — Per-domain reputation (code-review vs. data-analysis)
-- **Audit trail** — Every entry hashed, JSONL ledger, tamper-evident
-- **Tiered rankings** — Diamond / Gold / Silver / Bronze / Unproven
-- **Zero dependencies** — Pure Python stdlib. JSONL storage.
+The [`smoke` workflow](.github/workflows/smoke.yml) runs on every push and PR. It compiles the script, prints `--help`, then drives a full local smoke sequence in a throwaway `HOME` — register an agent, log outcomes, and compute trust — so the runner's real home stays clean. No network required.
+
+To reproduce it locally:
+
+```bash
+set -euo pipefail
+export HOME="$(mktemp -d)"            # isolate the ledger
+printf 'smoke-agent\nSmoke Agent\nCI\nhttps://example.com/smoke\n' | python3 repforge.py register
+printf 'smoke-agent\n1\nsmoke\nCI smoke success\n0.0\n'             | python3 repforge.py log
+python3 repforge.py reputation smoke-agent
+```
 
 ## 🔧 Requirements
 
-- Python 3.10+
+- Python 3.8+ (standard library only)
 - Nothing else.
 
 ## 📄 License
 
-MIT
+MIT — see [LICENSE](LICENSE).
 
 ---
 
-<p align="center">
-  <sub>Part of the <a href="https://hermtica.com">Hermtica</a> marketplace · $5.99</sub>
-</p>
+🧰 **[Tool on Hermtica Marketplace](https://hermtica.com/marketplace)**

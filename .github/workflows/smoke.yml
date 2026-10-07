@@ -1,0 +1,54 @@
+name: Smoke
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: Smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Compile check
+        run: python3 -m py_compile repforge.py
+
+      - name: Help
+        run: python3 repforge.py --help
+
+      - name: Smoke sequence (register -> log -> trust)
+        run: |
+          set -euo pipefail
+
+          # Isolate the ledger in a throwaway HOME so the runner stays clean.
+          export HOME="$(mktemp -d)"
+
+          # 1) Register a sample agent (interactive prompts fed via stdin:
+          #    id, display name, provider, url).
+          printf 'smoke-agent\nSmoke Agent\nCI\nhttps://example.com/smoke\n' \
+            | python3 repforge.py register
+
+          # 2) Log a couple of outcomes (id, choice 1=success/2=failure,
+          #    category, task, cost).
+          printf 'smoke-agent\n1\nsmoke\nCI smoke success\n0.0\n' \
+            | python3 repforge.py log
+          printf 'smoke-agent\n2\nsmoke\nCI smoke failure\n0.0\n' \
+            | python3 repforge.py log
+
+          # 3) Compute trust (Bayesian reputation) and audit the ledger.
+          python3 repforge.py reputation
+          python3 repforge.py reputation smoke-agent
+          python3 repforge.py audit smoke-agent
+
+          # 4) Sanity-check that the ledger was actually written.
+          test -s "$HOME/.repforge/ledger.jsonl"
+
+          echo "Smoke sequence complete."
